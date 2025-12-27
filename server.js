@@ -1,23 +1,22 @@
 import makeWASocket, { DisconnectReason, useMultiFileAuthState } from "@whiskeysockets/baileys";
 import axios from "axios";
 import qrcode from "qrcode-terminal";
+import express from "express";
 import dotenv from "dotenv";
 
 dotenv.config();
 
-
+const app = express();
 const GEMINI_KEY = process.env.GEMINI_KEY;
-
-// Bot ki memory store karne ke liye object
 const chatHistory = {};
+let qrCodeUrl = ""; // QR code store karne ke liye variable
 
 const systemPrompt = `
 Tumhara naam VedaBot hai.
-Tum India ke travel aur tourism ke prashno ka jawab doge.iske alawa aur bhi question ka ans do 
-aur har baar apna parichay mat do keval ek baar do
+Tum India ke travel aur tourism ke prashno ka jawab doge. Iske alawa aur bhi question ka ans do.
+Har baar apna parichay mat do, keval pehli baar do.
 Hamesha short aur friendly style me jawaab doge.
 Hindi aur thoda English mix me bolenge.
-
 Pichli baaton ko yaad rakh kar jawab dena.
 `;
 
@@ -34,23 +33,24 @@ async function startBot() {
 
   sock.ev.on("connection.update", ({ qr, connection, lastDisconnect }) => {
     if (qr) {
-      console.clear();
-      console.log("📌 Scan QR (60 sec valid)");
-      qrcode.generate(qr, { small: true });
+      console.log("📌 QR Received! Scan from the link below.");
+      qrCodeUrl = qr; // QR Browser ke liye save ho raha hai
+      qrcode.generate(qr, { small: true }); // Terminal backup
     }
 
     if (connection === "close") {
       const reason = lastDisconnect?.error?.output?.statusCode;
       if (reason === DisconnectReason.loggedOut) {
-        console.log("❗ Session expire — QR dobara milega");
         startBot();
       } else {
-        console.log("♻ Reconnecting...");
         startBot();
       }
     }
 
-    if (connection === "open") console.log("✅ BOT CONNECTED SUCCESSFULLY");
+    if (connection === "open") {
+      qrCodeUrl = ""; // Connect hone ke baad QR hata do
+      console.log("✅ BOT CONNECTED SUCCESSFULLY");
+    }
   });
 
   sock.ev.on("creds.update", saveCreds);
@@ -64,43 +64,49 @@ async function startBot() {
 
     if (msg) {
       const query = msg.trim();
-
-      // Agar is user ki pehle ki history nahi hai, toh empty array banao
       if (!chatHistory[remoteJid]) {
         chatHistory[remoteJid] = [{ role: "user", parts: [{ text: systemPrompt }] }];
       }
-
-      // User ka naya message history mein add karo
       chatHistory[remoteJid].push({ role: "user", parts: [{ text: query }] });
 
       try {
         const res = await axios.post(
-          `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_KEY}`,
-          {
-            contents: chatHistory[remoteJid] // Puri history bhej rahe hain
-          }
+          `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_KEY}`,
+          { contents: chatHistory[remoteJid] }
         );
 
         const reply = res.data.candidates?.[0]?.content?.parts?.[0]?.text || "❗ No response";
-
-        // Bot ka reply bhi history mein add karo taaki wo agle sawal mein yaad rahe
         chatHistory[remoteJid].push({ role: "model", parts: [{ text: reply }] });
 
-        // History ko zyada bada hone se rokne ke liye (Last 10 messages tak limit)
-        if (chatHistory[remoteJid].length > 10) {
-          chatHistory[remoteJid].splice(1, 2); // Purani baatein delete karega (System prompt ko chhod kar)
-        }
+        if (chatHistory[remoteJid].length > 10) chatHistory[remoteJid].splice(1, 2);
 
         await sock.sendMessage(remoteJid, { text: reply }, { quoted: m });
-
       } catch (e) {
-        console.error("Gemini Error:", e.response?.data || e.message);
-        await sock.sendMessage(remoteJid, {
-          text: "Veda is sleeping..."
-        });
+        await sock.sendMessage(remoteJid, { text: "Veda is sleeping..." });
       }
     }
   });
 }
 
-startBot();
+// Render URL par QR dikhane ke liye Web Server
+app.get("/", (req, res) => {
+  if (qrCodeUrl) {
+    res.send(`
+      <body style="background:#111; color:white; display:flex; flex-direction:column; align-items:center; justify-content:center; height:100vh; font-family:sans-serif;">
+        <h1>VedaBot QR Code</h1>
+        <div style="background:white; padding:20px; border-radius:10px;">
+          <img src="https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(qrCodeUrl)}" />
+        </div>
+        <p style="margin-top:20px;">Scan this with WhatsApp Linked Devices</p>
+        <script>setTimeout(() => { location.reload(); }, 20000);</script>
+      </body>
+    `);
+  } else {
+    res.send("<h1>VedaBot is Active & Connected ✅</h1>");
+  }
+});
+
+app.listen(process.env.PORT || 3000, () => {
+  console.log("Web server started for QR rendering.");
+  startBot();
+});
